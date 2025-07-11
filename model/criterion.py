@@ -16,7 +16,6 @@ import copy
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed
-from sklearn.tree._criterion import Criterion
 
 from .matcher import build_matcher
 from .structures.instances import Instances
@@ -25,6 +24,7 @@ from utils.misc import is_dist_avail_and_initialized, get_world_size, accuracy
 from .util import sigmoid_focal_loss
 from utils import box_ops
 from .structures import Boxes, matched_boxlist_iou
+from .structures.tracks import Tracks
 
 class FrameMatcher:
     def __init__(self, num_classes, matcher, weights, losses, focal_loss=True):
@@ -40,25 +40,23 @@ class FrameMatcher:
         self.matcher = matcher
         self.weights = weights
 
-        self.losses = losses
-        self.losses_dict = {}
+        self.loss_name = losses
+        self.losses = {}
         self.focal_loss = focal_loss
 
         self.gt_instances = None
         self.num_samples = 0
-        self.sample_device = None
+        self.device = None
         self._current_frame_idx = 0
         # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    def initialize_for_single_clip(self, gt_instances):
-        self.gt_instances = gt_instances
+    def initialize_for_single_clip(self, batch, hidden_dim, num_classes):
+        self.losses = {}
+        self.device = None
         self.num_samples = 0
-        self.sample_device = None
-        self._current_frame_idx = 0
-        self.losses_dict = {}
 
-    def _step(self):
-        self._current_frame_idx += 1
+
+
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -83,7 +81,7 @@ class FrameMatcher:
                                      gt_instances=[gt_instances],
                                      indices=[(src_idx, tgt_idx)],
                                      num_boxes=1)
-        self.losses_dict.update(
+        self.losses.update(
             {'frame_{}_track_{}'.format(frame_id, key): value for key, value in
              track_losses.items()})
 
@@ -309,29 +307,47 @@ class FrameMatcher:
                         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
                          l_dict.items()})
 
-        self._step()
         return track_instances
 
-    def regress_for_single_frame(self, outputs, frame_idx):
+    def regress_for_single_frame(self, outputs, tracked_instance, frame_idx):
         """
             Match all tracks and calculates losses for a single frame.
             The unmatched tracks will be further input into partition networks (New!)
             Args:
                 outputs: The model forward results
+                tracked_instance: Previous Track
                 frame_idx: frame_idx t.
             Returns:
                 track_instances: (It contains losses)
                 Unmatched tracks
         """
-        # Step 1. Get the all ground truth for current frame
+        # Step 1. Get all ground truths for current (i-th) frame
         gt_instances = self.gt_instances[frame_idx]
+        track_instances = outputs['track_instance']
+        det_loss = {
+            "pred_logits": track_instances.pred_logits.unsqueeze(0),    # shape: [1, N, num_classes]
+            "pred_boxes": track_instances.pred_boxes.unsqueeze(0),      # shape: [1, N, 4]
+        }                                                               # Model outputs for i-th frame
+        # Get all (ground truth) object index in i-th frame
+        obj_idxes_list = gt_instances.obj_ids.detach().cpu().numpy().tolist()
+        obj_gt_mapping = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
+
 
         unmatched_instances = None
-        # Step 2. Updated tracked instances.
-        track_instances = outputs['track_instance']
+        # Step 2. Get tracked instances.
+
+
+
         #
 
         return track_instances, unmatched_instances
+
+    # def update_track(self, model_res, tracked_instance):
+    #     # Update tracks from previous frame(s)
+    #     track_instance = Instances((1, 1))
+    #     for id in range(len(tracked_instance)):
+    #         track_instance[id]['track_instances'] = tracked_instance
+    #     return track_instances
 
 def match_for_single_decoder_layer(unmatched_outputs, matcher, untracked_gt_instances,
                                    unmatched_track_idxes, untracked_tgt_indexes, pred_logits_i):

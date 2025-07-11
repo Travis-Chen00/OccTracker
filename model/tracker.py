@@ -101,6 +101,7 @@ class Tracker(nn.Module):
         return track_instances.to(self.query_embed.weight.device)
 
     def _process_single_frame(self, frame, track_instances):
+        # Will be changed into forward(), Train the model frame by frame
         # print("Processing single frame")
 
         features, pos = self.backbone(frame)
