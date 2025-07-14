@@ -66,12 +66,13 @@ class Tracker(nn.Module):
         self.memory_bank = memory_bank
         self.track_recorder = TrackRecorder()
         self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
+        self.image_size = (1,1)
 
-    def _generate_empty_tracks(self):
+    def _generate_empty_tracks(self, image_size):
         num_queries, dim = self.query_embed.weight.shape  # (300, 512)
         device = self.query_embed.weight.device
 
-        track_instances = Tracks._init_tracks(dim, num_queries, self.mem_bank_len, device)
+        track_instances = Tracks._init_tracks(image_size, dim, num_queries, self.mem_bank_len, device)
 
         return track_instances.to(self.query_embed.weight.device)
 
@@ -165,14 +166,14 @@ class Tracker(nn.Module):
         return out
 
 
-    def forward(self, data):
-        frames = data['imgs']  # Whole frames
+    def forward(self, frame):
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
         }
 
-        track_instances = self._generate_empty_tracks()
+        _image_size = frame[-2:]                            # (H,W)
+        track_instances = self._generate_empty_tracks(_image_size)
         keys = list(track_instances._fields.keys())
 
         for idx, frame in enumerate(frames):

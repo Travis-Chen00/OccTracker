@@ -10,7 +10,6 @@
 
 import torch
 from torch import nn
-from triton.profiler import activate
 
 
 def bounding_box_partition(x, window_size):
@@ -47,26 +46,19 @@ def window_reverse(windows, window_size, H, W):
 
 class OcclusionRecoveryNetwork(nn.Module):
     """Occlusion Recovery Network:
-       Activate when the occlusion detection, Pathchlisation the instance and do Cross-Attention.
-       IN: Instance / Bounding box
-       IN: Frame t and Frame t-1
-       OUT: Completed bounding box
+    Activate when the occlusion detection, Pathchlisation the instance and do Cross-Attention.
+        :unmatched_instances: Tracks unmatched
+        :gt_instances: Ground Truth
+        :frame_idx: Current frame index
+        :d_model, d_ffn: Dimension of hidden layers
+        :num_heads, num_layers: Attention block parameters
     """
-    def __init__(self, dim_in, instance, window_size, num_heads):
+    def __init__(self, unmatched_instances, gt_instances, frame_idx, d_model, d_ffn, num_heads=4, num_layers=4):
         super().__init__()
-        self.instance = instance
-        self.dim_in = dim_in
-        self.window_size = window_size
-        self.num_heads = num_heads
+        self.unmatched_instances = unmatched_instances
+        self.gt_instances = gt_instances
 
-        self.norm1 = nn.LayerNorm(dim_in)
+        self._window_size = self.unmatched_instances[frame_idx]._image_size         # Image Size
 
-    def forward(self, x):
-        print(x)
-
-def build(args, layer_name, dim_in, hidden_dim, dim_out):
-    interaction_layers = {
-        'QIM': OcclusionRecoveryNetwork,
-    }
-    assert layer_name in interaction_layers, 'invalid query interaction layer: {}'.format(layer_name)
-    return interaction_layers[layer_name](args, dim_in, hidden_dim, dim_out)
+    def forward(self):
+        print(1)

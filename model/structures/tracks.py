@@ -41,8 +41,8 @@ class Tracks(Instances):
         return ret
 
     @staticmethod
-    def _init_tracks(hidden_dim, num_queries, mem_bank_len, device):
-        tracks = Tracks((1,1), hidden_dim, num_queries)
+    def _init_tracks(image_size, hidden_dim, num_queries, mem_bank_len, device):
+        tracks = Tracks(image_size=image_size, hidden_dim=hidden_dim, num_queries=num_queries)
 
         tracks.ref_pts = torch.zeros(0, 4)
         tracks.query_pos = torch.zeros(num_queries, 2 * hidden_dim)
