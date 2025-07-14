@@ -9,6 +9,7 @@ from .backbone import build_backbone
 from .transformer.deformable_transformer import build_deforamble_transformer
 from .util import MLP, TrackRecorder
 from .criterion import build_criterion
+from .structures.tracks import Tracks
 
 class Tracker(nn.Module):
     def __init__(self, args,
@@ -67,36 +68,10 @@ class Tracker(nn.Module):
         self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
 
     def _generate_empty_tracks(self):
-        track_instances = Instances((1, 1))
         num_queries, dim = self.query_embed.weight.shape  # (300, 512)
         device = self.query_embed.weight.device
-        track_instances.ref_pts = self.transformer.reference_points(self.query_embed.weight[:, :dim // 2])
-        track_instances.query_pos = self.query_embed.weight
-        track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device)
-        track_instances.obj_idxes = torch.full((len(track_instances),), -1,
-                                               dtype=torch.long, device=device) # -1 means unmatched objects
-        track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1,
-                                                      dtype=torch.long, device=device)
-        track_instances.disappear_time = torch.zeros((len(track_instances), ),
-                                                     dtype=torch.long, device=device)
-        track_instances.iou = torch.zeros((len(track_instances),),
-                                          dtype=torch.float, device=device)
-        track_instances.scores = torch.zeros((len(track_instances),),
-                                             dtype=torch.float, device=device)
-        track_instances.track_scores = torch.zeros((len(track_instances),),
-                                                   dtype=torch.float, device=device)
-        track_instances.pred_boxes = torch.zeros((len(track_instances), 4),
-                                                 dtype=torch.float, device=device)
-        track_instances.pred_logits = torch.zeros((len(track_instances), self.num_classes),
-                                                  dtype=torch.float, device=device)
 
-        mem_bank_len = self.mem_bank_len
-        track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2),
-                                               dtype=torch.float32, device=device)
-        track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len),
-                                                      dtype=torch.bool, device=device)
-        track_instances.save_period = torch.zeros((len(track_instances), ),
-                                                  dtype=torch.float32, device=device)
+        track_instances = Tracks._init_tracks(dim, num_queries, self.mem_bank_len, device)
 
         return track_instances.to(self.query_embed.weight.device)
 

@@ -8,36 +8,19 @@ class Tracks(Instances):
     Inherit from class Instances.
     Rewrite to add batch dimension into the instances.
     """
-    def __init__(self, image_size, hidden_dim=256, num_classes=10, **kwargs):
+    def __init__(self, image_size, hidden_dim=256, num_queries=10, **kwargs):
         """
             Image_size: Height, Width
             hidden_dim: Hidden dimension
             num_classes: Number of classes
         """
-        super(Instances).__init__(image_size, **kwargs)
-        self._height = image_size[0]
-        self._width = image_size[1]
-        self.hidden_dim = hidden_dim
-        self.num_classes = num_classes
-        self.query_embed = nn.Embedding(num_classes, 2 * hidden_dim)
-        self.query_pos = self.query_embed.weight
-        self.ref_pts = torch.zeros((0, 4))
-
-        self.obj_idx = torch.zeros((0,), dtype=torch.long)
-        self.scores = torch.zeros((0,), dtype=torch.float)
-
-        self.boxes = torch.zeros((0, 4))
-        self.logits = torch.zeros((0, self.num_classes), dtype=torch.float)
-        self.iou = torch.zeros((0, ), dtype=torch.float)
-        self.matched_idx = torch.zeros((0,), dtype=torch.long)
-        self.missing_period = torch.zeros((0,), dtype=torch.long)   # Missing period to delete tracks
-        self.last_output = torch.zeros((0, self.hidden_dim), dtype=torch.float)
-        self.long_memory = torch.zeros((0, self.hidden_dim), dtype=torch.float)
-        self.last_appear_boxes = torch.zeros((0, 4))
-
+        super().__init__(image_size, **kwargs)
+        self._image_size = image_size
+        self._hidden_dim = hidden_dim
+        self._num_queries = num_queries
 
     def to(self, *args: Any, **kwargs: Any):
-        res = Track(self.image_size, self.hidden_dim, self.num_classes)
+        res = Tracks(self.image_size, self.hidden_dim, self._num_queries)
         for k, v in kwargs.items():
             if hasattr(v, "to"):
                 v = v.to(*args, **kwargs)
@@ -45,19 +28,51 @@ class Tracks(Instances):
             res.set(k, v)
         return res
 
-    @staticmethod
-    def _init_tracks(batch, hidden_dim, num_classes, device):
-        shapes = [img[0].shape[-2:] for img in batch["imgs"]]  # (H, W)
-        # h_max, w_max = map(max, zip(*shapes))
+    def __getitem__(self, item):
+        if type(item) == int:
+            if item >= len(self) or item < -len(self):
+                raise IndexError("Instances index out of range!")
+            else:
+                item = slice(item, None, len(self))
 
-        tracks = [
-            Track(
-                image_size=(h, w),                              # 潜在归一化问题！
-                hidden_dim=hidden_dim,
-                num_classes=num_classes,
-            ).to(device)
-            for h, w in shapes
-        ]
+        ret = self.__class__(self._image_size)          # Class Tracks
+        for k, v in self._fields.items():
+            ret.set(k, v[item])
+        return ret
+
+    @staticmethod
+    def _init_tracks(hidden_dim, num_queries, mem_bank_len, device):
+        tracks = Tracks((1,1), hidden_dim, num_queries)
+
+        tracks.ref_pts = torch.zeros(0, 4)
+        tracks.query_pos = torch.zeros(num_queries, 2 * hidden_dim)
+        tracks.output_embedding = torch.zeros((num_queries, hidden_dim >> 1), device=device)
+        tracks.obj_idxes = torch.full((len(tracks),), -1,
+                                               dtype=torch.long, device=device) # -1 means unmatched objects
+        tracks.matched_gt_idxes = torch.full((len(tracks),), -1,
+                                                      dtype=torch.long, device=device)
+        tracks.missing_gt_idxes = torch.full((len(tracks),), -1,
+                                                      dtype=torch.long, device=device)
+        tracks.disappear_time = torch.zeros((len(tracks), ),
+                                                     dtype=torch.long, device=device)
+        tracks.iou = torch.zeros((len(tracks),),
+                                          dtype=torch.float, device=device)
+        tracks.scores = torch.zeros((len(tracks),),
+                                             dtype=torch.float, device=device)
+        tracks.track_scores = torch.zeros((len(tracks),),
+                                                   dtype=torch.float, device=device)
+        tracks.pred_boxes = torch.zeros((len(tracks), 4),
+                                                 dtype=torch.float, device=device)
+        tracks.pred_logits = torch.zeros((len(tracks), num_queries),
+                                                  dtype=torch.float, device=device)
+
+        tracks.mem_bank = torch.zeros((len(tracks), mem_bank_len, hidden_dim // 2),
+                                               dtype=torch.float32, device=device)
+        tracks.mem_padding_mask = torch.ones((len(tracks), mem_bank_len),
+                                                      dtype=torch.bool, device=device)
+        tracks.save_period = torch.zeros((len(tracks), ),
+                                                  dtype=torch.float32, device=device)
+
 
         return tracks
 
