@@ -150,18 +150,27 @@ class OcclusionRecoveryNetwork(nn.Module):
         :num_heads, num_layers: Attention block parameters
     """
     def __init__(self, unmatched_instances, prev_instances,
-                 frame_idx, d_model, d_ffn, num_heads=4, num_layers=4):
+                 frame_idx,
+                 patch_size, in_channel, embed_dim,
+                 d_model, d_ffn, num_heads=4, num_layers=4,
+                 norm_layer=None):
         super().__init__()
         self.unmatched_instances = unmatched_instances
         self.prev_instances = prev_instances
+        self.frame_idx = frame_idx
 
         self._window_size = self.unmatched_instances[frame_idx]._image_size         # Image Size
         # Two layers simple FFN
         # split image into non-overlapping patches
-        self.patch_embed = AdaptivePatchEmbed(
-            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+        self.patch_embed = AdaptivePatchEmbed(patch_size=patch_size, in_chans=in_channel, embed_dim=embed_dim,
             norm_layer=norm_layer if self.patch_norm else None)
 
-    def forward(self):
+    def forward(self, cur_frame, prev_frame):
+        # 两个dict 对应unmatched instances 在不同帧
+        cur_instance_idxes = self.unmatched_instances[self.frame_idx].obj_ids.detach().cpu().numpy().tolist()
+        prev_instance_idxes = self.prev_instances[self.frame_idx].obj_ids.detach().cpu().numpy().tolist()
 
+        assert len(cur_instance_idxes) == len(prev_instance_idxes), "Instances number are not matched!!"
         print(1)
+
+        # Return：结合过的instances, 主要是坐标的更新
