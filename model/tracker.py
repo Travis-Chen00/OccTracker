@@ -135,7 +135,7 @@ class Tracker(nn.Module):
         #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
         return out
 
-    def _matching_frames_with_orm(self, frame_res, track_instances, is_last, heigh, width):
+    def _matching_frames_with_orm(self, frame_res, track_instances, is_last, frame_idx, cur_frame, prev_frame):
         print("Matching frames with ORM")
         last_frame = False if is_last != 0 else True
 
@@ -166,17 +166,18 @@ class Tracker(nn.Module):
         return out
 
 
-    def forward(self, frame):
+    def forward(self, frames):
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
         }
 
-        _image_size = frame[-2:]                            # (H,W)
+        _image_size = frames[0][-2:]                            # (H,W)
         track_instances = self._generate_empty_tracks(_image_size)
         keys = list(track_instances._fields.keys())
 
         for idx, frame in enumerate(frames):
+            prev_frame = frame
             frame.requires_grad = False
             _, frame_h, frame_w = frame.shape
 
@@ -212,7 +213,7 @@ class Tracker(nn.Module):
                 frame = nested_tensor_from_tensor_list([frame])
                 frame_res = self._process_single_frame(frame, track_instances)
             frame_res = self._matching_frames_with_orm(frame_res, track_instances,
-                                                       len(frames) - idx, frame_h, frame_w)
+                                                       len(frames) - idx, idx, frame, prev_frame)
 
             track_instances = frame_res['track_instances']
             outputs['pred_logits'].append(frame_res['pred_logits'])
