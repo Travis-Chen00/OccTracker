@@ -13,36 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def bounding_box_partition(x, window_size):
-    """
-    Args:
-        x: (B, H, W, C)
-        window_size (int): window size
 
-    Returns:
-        windows: (num_windows*B, window_size, window_size, C)
-    """
-    B, H, W, C = x.shape
-    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    return windows
-
-
-def window_reverse(windows, window_size, H, W):
-    """
-    Args:
-        windows: (num_windows*B, window_size, window_size, C)
-        window_size (int): Window size
-        H (int): Height of image
-        W (int): Width of image
-
-    Returns:
-        x: (B, H, W, C)
-    """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
-    return x
 
 def to_2tuple(x):
     if isinstance(x, (list, tuple)):
@@ -330,6 +301,9 @@ class OcclusionRecoveryNetwork(nn.Module):
         super().__init__()
         # Two layers simple FFN
         # split image into non-overlapping patches
+
+        # 切割窗口 + Reference point (Deformable Attention)
+        # Patchlisation may increase the computation complexity, the object is fixed in bounding box!
         self.patch_embed = AdaptivePatchEmbed(patch_size=patch_size, in_chans=in_channel, embed_dim=embed_dim,
             norm_layer=norm_layer if norm_layer else None)
 
@@ -349,10 +323,18 @@ class OcclusionRecoveryNetwork(nn.Module):
         assert len(cur_instance_idxes) == len(filtered_prev_idxes), "Instances number are not matched!!"
 
         for idx in cur_instance_idxes:
-            cur_obj = self.patch_embed(cur_frame,
-                                             self.unmatched_instances[frame_idx][idx].pred_box.tolist())
-            prev_obj = self.patch_embed(prev_frame,
-                                              self.prev_instances[frame_idx][idx].pred_box.tolist())
+            cur_obj, cur_coord = bbox_cut(image=cur_frame,
+                                          image_size=self.unmatched_instances[frame_idx][idx]._image_size,
+                                          coord=self.unmatched_instances[frame_idx][idx].pred_box.tolist())
+            # Cut the object from orignal image and get new coords.
+            prev_obj, prev_coord = bbox_cut(image=prev_frame,
+                                          image_size=self.prev_instances[frame_idx][idx]._image_size,
+                                          coord=self.prev_instances[frame_idx][idx].pred_box.tolist())
+
+            # cur_obj = self.patch_embed(cur_frame,
+            #                                  self.unmatched_instances[frame_idx][idx].pred_box.tolist())
+            # prev_obj = self.patch_embed(prev_frame,
+            #                                   self.prev_instances[frame_idx][idx].pred_box.tolist())
 
             _window_size = unmatched_instances[frame_idx][idx]._image_size
             cur_reconstruction = self.patchCrossAttn(cur_obj, prev_obj)
@@ -363,6 +345,7 @@ class OcclusionRecoveryNetwork(nn.Module):
             self.unmatched_instances[frame_idx][idx].pred_box = refined_bbox
 
         # 不用返回物体，直接更新了instance
+        # 返回loss 做新的loss计算，更新了instance的 bbox 坐标 在CA模块中
         return None
 
 
