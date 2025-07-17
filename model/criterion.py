@@ -16,7 +16,6 @@ import copy
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed
-from Demos.win32cred_demo import target
 
 from .matcher import build_matcher
 from .structures.instances import Instances
@@ -26,12 +25,14 @@ from .util import sigmoid_focal_loss
 from utils import box_ops
 from .structures import Boxes, matched_boxlist_iou
 from .structures.tracks import Tracks
+from .orn import OcclusionRecoveryNetwork
 
 
 class FrameMatcher:
-    def __init__(self, num_classes, matcher, weights, losses, focal_loss=True):
+    def __init__(self, corrector, num_classes, matcher, weights, losses, focal_loss=True):
         """
                 Parameters:
+            corrector: Occlusion Recovery Network
             num_classes: number of object categories, omitting the special no-object category
             matcher: HungarianMatcher from DETR
             weight_dict: dict containing as key the names of the losses and as values their relative weight.
@@ -51,6 +52,8 @@ class FrameMatcher:
         self.device = None
         self._current_frame_idx = 0
         # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        self.corrector = corrector
 
     def initialize_for_single_clip(self, gt_instances):
         self.losses = {}
@@ -425,7 +428,7 @@ class FrameMatcher:
             Input: Occluded tracks, prev_matched_track_idxes 当前信息和上一帧的信息
             Returns: loss 或者更新的框
         """
-
+        self.corrector(,frame_idx)
 
         # Step 7: loss computation
 
