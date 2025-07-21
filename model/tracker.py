@@ -19,6 +19,7 @@ class Tracker(nn.Module):
                  num_classes,
                  num_queries,
                  num_feature_levels,
+                 occ_threshold=0.5,
                  memory_bank=None,
                  use_checkpoint=False):
         super(Tracker, self).__init__()
@@ -31,8 +32,8 @@ class Tracker(nn.Module):
         self.num_feature_levels = num_feature_levels
         self.criterion = criterion
 
-        self.class_embed = nn.Linear(hidden_dim, num_classes)
-        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.class_embed = nn.Linear(hidden_dim, num_classes)                               # 分类头
+        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)             # 回归头
         self.query_embed = nn.Embedding(num_queries, hidden_dim * 2)
 
         if num_feature_levels > 1:
@@ -62,11 +63,13 @@ class Tracker(nn.Module):
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
 
+        self.occ_threshold = occ_threshold
         self.use_checkpoint = use_checkpoint
         self.memory_bank = memory_bank
         self.track_recorder = TrackRecorder()
         self.mem_bank_len = 0 if memory_bank is None else memory_bank.max_his_length
         self.image_size = (1,1)
+        self.feature_mem = {}
 
     def _generate_empty_tracks(self, image_size):
         num_queries, dim = self.query_embed.weight.shape  # (300, 512)
@@ -76,13 +79,16 @@ class Tracker(nn.Module):
 
         return track_instances.to(self.query_embed.weight.device)
 
-    def _process_single_frame(self, frame, track_instances):
+    def _process_single_frame(self, frame, track_instances, frame_idx):
         # Will be changed into forward(), Train the model frame by frame
         # print("Processing single frame")
 
         features, pos = self.backbone(frame)
         src, mask = features[-1].decompose()
         assert mask is not None
+
+        # 取第一层特征
+        self.feature_mem[frame_idx] = features[0]
 
         srcs, masks = [], []
         for level, feature in enumerate(features):
@@ -135,7 +141,7 @@ class Tracker(nn.Module):
         #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
         return out
 
-    def _matching_frames_with_orm(self, frame_res, track_instances, is_last, frame_idx, cur_frame, prev_frame):
+    def _matching_frames_with_orm(self, frame_res, track_instances, is_last, frame_idx):
         print("Matching frames with ORM")
         last_frame = False if is_last != 0 else True
 
@@ -149,6 +155,11 @@ class Tracker(nn.Module):
             else:
                 track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
 
+        outputs = {
+            'pred_logits': [],
+            'pred_boxes': [],
+        }
+
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -156,14 +167,27 @@ class Tracker(nn.Module):
         if self.training:
             # the track id will be assigned by the mather.
             frame_res['track_instances'] = track_instances
-            track_instances = self.criterion.match_for_single_frame(frame_res)
+
+            if frame_idx == 0:
+                features = [self.feature_mem[frame_idx]]
+            else:
+                features = self.feature_mem[frame_idx - 1 : frame_idx]
+
+            # Get the loss and refine the bbox
+            frame_res = self.criterion.regress_for_single_frame(frame_res, frame_idx, self.device,
+                                                                      features, occ_threshold=self.occ_threshold)
         else:
             # each track will be assigned an unique global id by the track base.
             self.track_recorder.update(track_instances)
 
+        track_instances = frame_res['track_instances']
+        outputs['pred_logits'].append(frame_res['pred_logits'])
+        outputs['pred_boxes'].append(frame_res['pred_boxes'])
 
-        out = 1
-        return out
+        if not self.training:
+            outputs['track_instances'] = track_instances
+
+        return outputs
 
 
     def forward(self, frames):
@@ -175,6 +199,7 @@ class Tracker(nn.Module):
         _image_size = frames[0][-2:]                            # (H,W)
         track_instances = self._generate_empty_tracks(_image_size)
         keys = list(track_instances._fields.keys())
+        features = None
 
         for idx, frame in enumerate(frames):
             prev_frame = frame
@@ -186,7 +211,7 @@ class Tracker(nn.Module):
                 def fn(frame, *args):
                     frame = nested_tensor_from_tensor_list([frame])
                     tmp = Instances((1, 1), **dict(zip(keys, args)))
-                    frame_res = self._process_single_frame(frame, tmp)
+                    frame_res, features = self._process_single_frame(frame, tmp)
                     return (
                         frame_res['pred_logits'],
                         frame_res['pred_boxes'],
@@ -211,9 +236,10 @@ class Tracker(nn.Module):
                 }
             else:
                 frame = nested_tensor_from_tensor_list([frame])
-                frame_res = self._process_single_frame(frame, track_instances)
+                frame_res, features = self._process_single_frame(frame, track_instances, idx)
+
             frame_res = self._matching_frames_with_orm(frame_res, track_instances,
-                                                       len(frames) - idx, idx, frame, prev_frame)
+                                                       len(frames) - idx, idx,)
 
             track_instances = frame_res['track_instances']
             outputs['pred_logits'].append(frame_res['pred_logits'])

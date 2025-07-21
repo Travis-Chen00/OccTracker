@@ -54,6 +54,7 @@ class FrameMatcher:
         # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.corrector = corrector
+        self.prev_instance = None
 
     def initialize_for_single_clip(self, gt_instances):
         self.losses = {}
@@ -197,123 +198,7 @@ class FrameMatcher:
         losses = {'cardinality_error': card_err}
         return losses
 
-    def match_for_single_frame(self, outputs):
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
-        track_instances = outputs_without_aux['track_instance']
-
-        gt_instances_ith = self.gt_instances[self._current_frame_idx]  # i-th image
-        pred_logits_ith = track_instances.pred_logits  # predicted logits of i-th image.
-        pred_boxes_ith = track_instances.pred_boxes  # predicted boxes of i-th image.
-
-        obj_idxes = gt_instances_ith.obj_ids
-        obj_idxes_list = obj_idxes.detach().cpu().numpy().tolist()
-        # Set mapping from object ID to ground truth ID
-        obj_map_gt = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
-
-        outputs_ith = {
-            'pred_logits': pred_logits_ith.unsqueeze(0),
-            'pred_boxes': pred_boxes_ith.unsqueeze(0),
-        }
-
-        # step1. inherit and update the previous tracks.
-        num_disappear_track = 0
-        for t in range(len(track_instances)):
-            obj_id = track_instances.obj_idxes[t].item()  # Object ID
-
-            if obj_id >= 0:
-                if obj_id not in obj_map_gt:
-                    num_disappear_track += 1
-                    track_instances.matched_gt_idxes[t] -= 1
-                else:
-                    track_instances.matched_gt_idxes[t] = obj_map_gt[obj_id]  # Assign the id
-            else:
-                track_instances.matched_gt_idxes[t] -= 1  # Not matched
-
-        matched_track_idxes = (track_instances.obj_idxes >= 0)  # occu
-        full_track_idxes = torch.arange(len(track_instances),
-                                        dtype=torch.long).to(pred_logits_ith.device)
-        prev_matched_indices = torch.stack(
-            [full_track_idxes[matched_track_idxes],
-             track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(
-            pred_logits_ith.device)
-
-        # step2. select the unmatched slots.
-        unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
-
-        # Do partition this step
-
-        # Step 3. New track
-        tgt_indexes = track_instances.matched_gt_idxes
-        tgt_indexes = tgt_indexes[tgt_indexes != -1]
-
-        tgt_state = torch.zeros(len(gt_instances_ith)).to(pred_logits_ith.device)
-        untracked_tgt_indexes = torch.arange(len(gt_instances_ith)).to(
-            pred_logits_ith.device)[tgt_state == 0]
-        untracked_gt_instances = gt_instances_ith[untracked_tgt_indexes]
-
-        # step4. do matching between the unmatched slots and GTs.
-        unmatched_outputs = {
-            'pred_logits': track_instances.pred_logits[unmatched_track_idxes].unsqueeze(0),
-            'pred_boxes': track_instances.pred_boxes[unmatched_track_idxes].unsqueeze(0),
-        }
-        new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher,
-                                                             untracked_gt_instances,
-                                                             unmatched_track_idxes, untracked_tgt_indexes,
-                                                             pred_logits_ith)
-
-        # step5. update obj_idxes according to the new matching result.
-        track_instances.obj_idxes[new_matched_indices[:, 0]] = (
-            gt_instances_ith.obj_ids[new_matched_indices[:, 1]].long())
-        track_instances.matched_gt_idxes[new_matched_indices[:, 0]] = new_matched_indices[:, 1]
-
-        # step6. calculate iou.
-        active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
-        active_track_boxes = track_instances.pred_boxes[active_idxes]
-        if len(active_track_boxes) > 0:
-            gt_boxes = gt_instances_ith.boxes[track_instances.matched_gt_idxes[active_idxes]]
-            active_track_boxes = box_ops.box_cxcywh_to_xyxy(active_track_boxes)
-            gt_boxes = box_ops.box_cxcywh_to_xyxy(gt_boxes)
-            track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
-
-        # step7. merge the unmatched pairs and the matched pairs.
-        matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
-
-        # step8. calculate the loss
-        self.num_samples += len(gt_instances_ith) + num_disappear_track
-        self.sample_device = pred_logits_ith.device
-        for loss in self.losses:
-            new_track_loss = self.get_loss(loss,
-                                           outputs=outputs_ith,
-                                           gt_instances=[gt_instances_ith],
-                                           indices=[(matched_indices[:, 0], matched_indices[:, 1])],
-                                           num_boxes=1)
-            self.losses_dict.update(
-                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
-
-        if 'aux_outputs' in outputs:
-            for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                unmatched_outputs_layer = {
-                    'pred_logits': aux_outputs['pred_logits'][0, unmatched_track_idxes].unsqueeze(0),
-                    'pred_boxes': aux_outputs['pred_boxes'][0, unmatched_track_idxes].unsqueeze(0),
-                }
-                new_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer, self.matcher)
-                matched_indices_layer = torch.cat([new_matched_indices_layer, prev_matched_indices], dim=0)
-                for loss in self.losses:
-                    if loss == 'masks':
-                        # Intermediate masks losses are too costly to compute, we ignore them.
-                        continue
-                    l_dict = self.get_loss(loss,
-                                           aux_outputs,
-                                           gt_instances=[gt_instances_ith],
-                                           indices=[(matched_indices_layer[:, 0], matched_indices_layer[:, 1])],
-                                           num_boxes=1, )
-                    self.losses_dict.update(
-                        {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
-                         l_dict.items()})
-
-        return track_instances
-
-    def regress_for_single_frame(self, outputs, frame_idx, device, occ_threshold=0.5):
+    def regress_for_single_frame(self, outputs, frame_idx, device, features, cls_head, reg_head, occ_threshold=0.5):
         """
             Match all tracks and calculates losses for a single frame.
             The unmatched tracks will be further input into partition networks (New!)
@@ -330,6 +215,9 @@ class FrameMatcher:
         gt_instances = self.gt_instances[frame_idx]
         track_instances = outputs['track_instance']
         unmatched_instances = None                              # Unmatched Scenarios: 1. Totally missing. 2. Occlusion
+
+        if frame_idx == 0:
+            self.prev_instance = track_instances
 
         # Step 2. Initialise loss dict
         det_loss = {
@@ -426,14 +314,24 @@ class FrameMatcher:
         """
             New module here
             Input: Occluded tracks, prev_matched_track_idxes 当前信息和上一帧的信息
-            Returns: loss 或者更新的框
+            Returns: loss
         """
-        self.corrector(,frame_idx)
+        self.corrector(occluded_tracks, self.prev_instance[occ_indices], frame_idx, features)
 
         # Step 7: loss computation
+        self.sample_device = device
+        for loss in self.loss_name:
+            new_track_loss = self.get_loss(loss,
+                                           outputs=outputs,
+                                           gt_instances=[gt_instances],
+                                           indices=[(new_indices[:, 0], new_indices[:, 1])],
+                                           num_boxes=1)
+            self.losses.update(
+                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
 
 
-        return track_instances, unmatched_instances
+        self.prev_instance = track_instances
+        return track_instances
 
     # def update_track(self, model_res, tracked_instance):
     #     # Update tracks from previous frame(s)
