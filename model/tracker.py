@@ -265,3 +265,5 @@ def build_tracker(args):
         backbone=backbone,
         transformer=transformer,
         criterion=criterion,)
+
+    return model
