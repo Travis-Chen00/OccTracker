@@ -63,6 +63,7 @@ def _get_activation(activation: str):
 
 
 def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: bool = False):
+    # May rewrite later
     if not is_main_process():
         return model
     pretrained_checkpoint = torch.load(pretrained_path, map_location=lambda storage, loc: storage)
