@@ -52,4 +52,3 @@ def train(args):
 
 if __name__ == '__main__':
     args, config = parse_options()
-
