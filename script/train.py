@@ -10,6 +10,7 @@ import torch
 from utils.utils import set_seed
 from utils.config import get_config
 
+print("train")
 
 def parse_options():
     parser = argparse.ArgumentParser('OccTracker Training', add_help=False)

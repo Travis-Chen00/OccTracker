@@ -108,6 +108,7 @@ def get_config(args):
     config = _C.clone()
     update_config(config, args)
 
+    config
     return config
 
 
