@@ -14,11 +14,13 @@ from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
 from data import build_dataset
 from model import build_model
 import torch
-from utils.utils import set_seed, load_pretrained_model, distributed_rank, is_distributed, save_checkpoint, get_model
+from utils.utils import (set_seed, load_pretrained_model, distributed_rank,
+                         is_distributed, save_checkpoint, get_model, distributed_world_size)
 from utils.config import get_config
 from logger import Logger
 from model.criterion import build_criterion
 from model.structures.tracks import Tracks
+from utils.nested_tensor import tensor_list_to_nested_tensor
 
 print("train")
 
@@ -170,6 +172,77 @@ def train_one_epoch(epoch, model, criterion, optimizer, dataloader,
                                      mem_bank_len=get_model(model).mem_bank_len,
                                      device=device)
         criterion.initialize_for_single_clip(batch['gt_instances'])
+
+        for frame_idx in range(len(batch["imgs"][0])):
+            with torch.no_grad():
+                frame = [fs[frame_idx] for fs in batch["imgs"]]
+                for i in frame:
+                    i.requires_grad = True
+
+                frame = tensor_list_to_nested_tensor(frame).to(device)
+                res = model(frame)
+                previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                    model_outputs=res,
+                    tracked_instances=tracks,
+                    frame_idx=frame_idx
+                )
+
+        loss_dict, log_dict = criterion.get_mean_by_n_gts()
+        loss = criterion.get_sum_loss_dict(loss_dict=loss_dict)
+
+        # Metrics log
+        loss = loss / 1
+        loss.backward()
+
+        if (i + 1) % 1 == 0:
+            # if max_norm > 0:
+            #     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            # else:
+            #     pass
+            optimizer.step()
+            optimizer.zero_grad()
+
+        # For logging
+        # for log_k in log_dict:
+        #     metric_log.update(name=log_k, value=log_dict[log_k][0])
+        iter_end_timestamp = time.time()
+        # metric_log.update(name="time per iter", value=iter_end_timestamp - iter_start_timestamp)
+        # Outputs logs
+        if i % 100 == 0:
+            # metric_log.sync()
+            max_memory = max([torch.cuda.max_memory_allocated(torch.device('cuda', i))
+                              for i in range(distributed_world_size())]) // (1024 ** 2)
+            # second_per_iter = metric_log.metrics["time per iter"].avg
+            logger.show(head=f"[Epoch={epoch}, Iter={i}, "
+                             # f"{second_per_iter:.2f}s/iter, "
+                             f"{i}/{dataloader_len} iters, "
+                             # f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                             f"Max Memory={max_memory}MB]",
+                        )
+            logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
+                          filename="log.txt", mode="a")
+            logger.tb_add_metric_log( steps=train_states["global_iters"], mode="iters")
+
+        # if multi_checkpoint:
+        #     if i % 100 == 0 and is_main_process():
+        #         save_checkpoint(
+        #             model=model,
+        #             path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+        #         )
+        #
+        train_states["global_iters"] += 1
+
+        # Epoch end
+
+    # metric_log.sync()
+    epoch_end_timestamp = time.time()
+    epoch_minutes = int((epoch_end_timestamp - epoch_start_timestamp) // 60)
+    logger.show(head=f"[Epoch: {epoch}, Total Time: {epoch_minutes}min]",)
+    logger.write(head=f"[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
+                 filename="log.txt", mode="a")
+    logger.tb_add_metric_log( steps=epoch, mode="epochs")
+
+    return
 
 def get_param_groups(config, model):
     """

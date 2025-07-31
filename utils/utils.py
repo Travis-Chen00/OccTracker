@@ -22,6 +22,12 @@ def distributed_rank():
     else:
         return torch.distributed.get_rank()
 
+def distributed_world_size():
+    if is_distributed():
+        return torch.distributed.get_world_size()
+    else:
+        return 1
+
 def set_seed(seed: int):
     seed = seed + distributed_rank()
     torch.manual_seed(seed)
