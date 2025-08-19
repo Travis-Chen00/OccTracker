@@ -1,111 +1,129 @@
-# This file is used to define the config
-# File path "/config/model.yaml"
-
-import torch
 import os
 import yaml
 from yacs.config import CfgNode as CN
 
-_C = CN()
 
-# Base config files
-_C.BASE = ['']
+def load_config(config_path):
+    """
+    Load configuration from a YAML file
 
-# ================================
-#        Dataset config
-# ================================
-_C.BATCH_SIZE = 1
-_C.PATH = ""
-_C.DATASET = "nuscenes"                         # May BDD100K AND SO ON LATER for comparison
-_C.IMAGE_SIZE = 224
-_C.INTERPOLATION = "bilinear"
-_C.NUM_WORKERS = 8
+    Args:
+        config_path (str): Path to the configuration YAML file
 
+    Returns:
+        CN: Configuration object
+    """
+    # Create a default config
+    _C = CN()
 
-# ===============================
-#       Model config
-# ===============================
-_C.BACKBONE = "resnet50"                      # Resnet50 or may be others later
-_C.PRETRAINED = ""                            # Pretrained model or not
-_C.NUM_CLASSES = 10                           # Num of class as the object query
+    # Load from YAML
+    with open(config_path, 'r') as f:
+        cfg_dict = yaml.safe_load(f)
 
-_C.DROP_RATE = 0.0
-_C.WINDOW_SIZE = 8                            # The size for window partition
-_C.DEVICE = "cuda"                            # Device
-_C.USE_CHECKPOINT = False
+    # Update config
+    _C.update(cfg_dict)
 
-_C.HIDDEN_DIM = 256
-_C.FFN_DIM = 2048
-_C.FEATURE_LEVEL = 4
-_C.NUM_HEADS = 8
-_C.NUM_ENC_POINTS = 4
-_C.NUM_DEC_POINTS = 4
-_C.NUM_ENC_LAYERS = 6
-_C.NUM_DEC_LAYERS = 6
-_C.ACTIVATION = "relu"
-_C.OCC_THRESHOLD = 0.5
-_C.MISS_PERIOD = 10
-_C.NUM_DET_QUERIES = 100                      # DETR proposal generation
+    return _C
 
 
-# ===============================
-#       Train config
-# ===============================
-_C.EPOCH = 100                                 # Training epoch
-_C.LR = 2.0e-4
-_C.LR_BACKBONE = ""
-_C.SEED = 40
-_C.OPTIMIZER = "adamw"
-_C.SHUFFLE = True
+def update_config(config, args=None, **kwargs):
+    """
+    Update configuration with additional parameters
 
-def _update_config_from_file(config, cfg_file):
+    Args:
+        config (CN): Original configuration
+        args (Namespace or dict, optional): Arguments to update
+        **kwargs: Additional key-value pairs to update
+
+    Returns:
+        CN: Updated configuration
+    """
     config.defrost()
-    with open(cfg_file, 'r') as f:
-        yaml_cfg = yaml.load(f, Loader=yaml.FullLoader)
 
-    for cfg in yaml_cfg.setdefault('BASE', ['']):
-        if cfg:
-            _update_config_from_file(
-                config, os.path.join(os.path.dirname(cfg_file), cfg)
-            )
-    print('=> merge config from {}'.format(cfg_file))
-    config.merge_from_file(cfg_file)
+    # 处理args（支持Namespace和dict）
+    if args is not None:
+        # 将Namespace转换为字典
+        if hasattr(args, '__dict__'):
+            args_dict = vars(args)
+        else:
+            args_dict = args
+
+        for key, value in args_dict.items():
+            # 忽略None值
+            if value is not None:
+                # 检查顶层配置
+                if hasattr(config, key.upper()):
+                    setattr(config, key.upper(), value)
+
+                # 检查嵌套配置
+                nested_sections = ['DATA', 'MODEL', 'TRAIN', 'DATASET']
+                for section in nested_sections:
+                    if hasattr(config, section):
+                        section_config = getattr(config, section)
+                        if hasattr(section_config, key.upper()):
+                            setattr(section_config, key.upper(), value)
+
+    # 处理直接传入的关键字参数
+    for key, value in kwargs.items():
+        if value is not None:
+            if hasattr(config, key.upper()):
+                setattr(config, key.upper(), value)
+
+            # 检查嵌套配置
+            nested_sections = ['DATA', 'MODEL', 'TRAIN', 'DATASET']
+            for section in nested_sections:
+                if hasattr(config, section):
+                    section_config = getattr(config, section)
+                    if hasattr(section_config, key.upper()):
+                        setattr(section_config, key.upper(), value)
+
     config.freeze()
-
-
-def update_config(config, args):
-    _update_config_from_file(config, args.cfg)
-
-    config.defrost()
-    if args.opts:
-        config.merge_from_list(args.opts)
-
-    def _check_args(name):
-        if hasattr(args, name) and eval(f'args.{name}'):
-            return True
-        return False
-
-    # merge from specific arguments
-    if _check_args('batch_size'):
-        config.DATA.BATCH_SIZE = args.batch_size
-    if _check_args('data_path'):
-        config.DATA.DATA_PATH = args.data_path
-    if _check_args('pretrained'):
-        config.MODEL.PRETRAINED = args.pretrained
-    if _check_args('use_checkpoint'):
-        config.TRAIN.USE_CHECKPOINT = True
-    if _check_args('optim'):
-        config.TRAIN.OPTIMIZER = args.optim
-
-    config.OUTPUT = os.path.join(config.OUTPUT, config.MODEL.NAME)
-    config.freeze()
-
-
-def get_config(args):
-    """Get a yacs CfgNode object with default values."""
-    # Return a clone so that the defaults will not be altered
-    # This is for the "local variable" use pattern
-    config = _C.clone()
-    update_config(config, args)
-
     return config
+
+
+
+# def save_config(config, save_path):
+#     """
+#     Save configuration to a YAML file
+#
+#     Args:
+#         config (CN): Configuration to save
+#         save_path (str): Path to save the configuration
+#     """
+#     config.defrost()
+#     # 转换为普通字典
+#     config_dict = {}
+#     for k, v in config.items():
+#         if isinstance(v, CN):
+#             config_dict[k] = {inner_k: inner_v for inner_k, inner_v in v.items()}
+#         else:
+#             config_dict[k] = v
+#
+#     with open(save_path, 'w') as f:
+#         yaml.dump(config_dict, f, default_flow_style=False)
+#     config.freeze()
+
+
+# 使用示例
+# if __name__ == "__main__":
+#     # 加载配置
+#     config_path = "/home/boyu/Desktop/OccTracker/config/tracker.yaml"
+#     cfg = load_config(config_path)
+#
+#     # 方法1：传入字典
+#     args_dict = {
+#         'batch_size': 16,
+#         'lr': 1e-3,
+#         'num_workers': 4,
+#         'version': 'v1.0-trainval'
+#     }
+#     updated_cfg = update_config(cfg, args=args_dict)
+#
+#     # 打印更新后的配置
+#     # print("Updated Batch Size:", updated_cfg.BATCH_SIZE)
+#     # print("Updated Learning Rate:", updated_cfg.LR)
+#     # print("Updated Version:", updated_cfg.VERSION)
+#     print(updated_cfg)
+#
+#     # 保存更新后的配置
+#     # save_config(updated_cfg, "/config/updated_model.yaml")

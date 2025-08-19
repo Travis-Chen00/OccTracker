@@ -21,7 +21,7 @@ from ..ops.modules import MSDeformAttn
 
 
 class DeformableTransformer(nn.Module):
-    def __init__(self, d_model=256, d_ffn=1024,
+    def __init__(self, device, d_model=256, d_ffn=1024,
                  num_feature_levels=4, num_heads=8,
                  num_enc_points=4, num_dec_points=4,
                  num_enc_layers=6, num_dec_layers=6,
@@ -43,7 +43,7 @@ class DeformableTransformer(nn.Module):
                                                num_points=num_enc_points,
                                                sigmoid_attn=False)
 
-        self.encoder = DeformableEncoder(encoder_layer, num_enc_layers, use_checkpoint)
+        self.encoder = DeformableEncoder(encoder_layer, num_enc_layers, use_checkpoint, device)
 
         decoder_layer = DeformableDecoderLayer(d_model=d_model, d_ffn=d_ffn,
                                                dropout=dropout, activation=activation,
@@ -51,13 +51,12 @@ class DeformableTransformer(nn.Module):
                                                num_points=num_dec_points,
                                                self_cross=decoder_self_cross, sigmoid_attn=False)
 
-        self.decoder = DeformableDecoder(decoder_layer, num_dec_layers, return_intermediate_dec)
+        self.decoder = DeformableDecoder(decoder_layer, num_dec_layers, return_intermediate_dec, device)
 
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
-
-        self._reset_parameters()
         self.reference_points = nn.Linear(d_model, 2)
 
+        self.reset_parameters()
 
     def reset_parameters(self):
         for p in self.parameters():
@@ -65,7 +64,7 @@ class DeformableTransformer(nn.Module):
                 nn.init.xavier_uniform_(p)
         for m in self.modules():
             if isinstance(m, MSDeformAttn):
-                m.reset_parameters()
+                m._reset_parameters()
         if not self.two_stage:
             xavier_uniform_(self.reference_points.weight.data, gain=1.0)
             constant_(self.reference_points.bias.data, 0.)
@@ -203,20 +202,21 @@ class DeformableTransformer(nn.Module):
 
 def build_deforamble_transformer(args):
     return DeformableTransformer(
-        d_model=args.hidden_dim,
-        d_ffn=args.ffn_dim,
-        num_feature_levels=args.num_feature_levels,
-        num_heads=args.nheads,
-        num_enc_layers=args.enc_layers,
-        num_dec_layers=args.dec_layers,
-        num_enc_points=args.enc_n_points,
-        num_dec_points=args.dec_n_points,
-        dropout=args.dropout,
+        d_model=args.HIDDEN_DIM,
+        d_ffn=args.FFN_DIM,
+        num_feature_levels=args.FEATURE_LEVEL,
+        num_heads=args.NUM_HEADS,
+        num_enc_layers=args.NUM_ENC_LAYERS,
+        num_dec_layers=args.NUM_DEC_LAYERS,
+        num_enc_points=args.NUM_ENC_POINTS,
+        num_dec_points=args.NUM_DEC_POINTS,
+        dropout=args.DROPOUT,
         activation="relu",
         return_intermediate_dec=True,
-        two_stage=args.two_stage,
-        two_stage_num_proposals=args.num_queries,
-        decoder_self_cross=not args.decoder_cross_self,
-        use_checkpoint=args.use_checkpoint,
-        checkpoint_level=args.checkpoint_level
+        two_stage=args.TWO_STAGES,
+        two_stage_num_proposals=args.NUM_QUERIES,
+        decoder_self_cross=not args.DECODER_CROSS_SELF,
+        use_checkpoint=args.USE_CHECKPOINT,
+        checkpoint_level=args.CHECKPOINT_LEVEL,
+        device=args.DEVICE
     )

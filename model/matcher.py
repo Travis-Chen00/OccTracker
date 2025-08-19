@@ -80,8 +80,8 @@ class HungarianMatcher(nn.Module):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
                 tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
             else:
-                tgt_ids = torch.cat([v["labels"] for v in targets])
-                tgt_bbox = torch.cat([v["boxes"] for v in targets])
+                tgt_ids = torch.cat([v["labels"] for v in targets[0]])
+                tgt_bbox = torch.cat([v["boxes"] for v in targets[0]])
 
             # Compute the classification cost.
             if use_focal:
@@ -110,7 +110,7 @@ class HungarianMatcher(nn.Module):
             if isinstance(targets[0], Instances):
                 sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
             else:
-                sizes = [len(v["boxes"]) for v in targets]
+                sizes = [len(v["boxes"]) for v in targets[0]]
 
             indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
             return [(torch.as_tensor(i, dtype=torch.int64),
@@ -118,6 +118,6 @@ class HungarianMatcher(nn.Module):
 
 
 def build_matcher(args):
-    return HungarianMatcher(cost_class=args.set_cost_class,
-                            cost_bbox=args.set_cost_bbox,
-                            cost_giou=args.set_cost_giou)
+    return HungarianMatcher(cost_class=args.MATCH_COST_CLASS,
+                            cost_bbox=args.MATCH_COST_BBOX,
+                            cost_giou=args.MATCH_COST_GIOU)

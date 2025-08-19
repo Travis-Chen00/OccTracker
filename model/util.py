@@ -54,7 +54,7 @@ class MLP(nn.Module):
         return x
 
 def _get_activation(activation: str):
-    if activation == "ReLU":
+    if activation == "ReLU" or activation == "relu":
         return nn.ReLU(True)
     elif activation == "GELU":
         return nn.GELU()

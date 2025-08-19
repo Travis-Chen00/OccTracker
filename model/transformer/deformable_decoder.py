@@ -18,11 +18,12 @@ from utils.misc import inverse_sigmoid
 
 
 class DeformableDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, return_intermediate=False):
+    def __init__(self, decoder_layer, num_layers, device, return_intermediate=False):
         super(DeformableDecoder, self).__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.return_intermediate = return_intermediate
+        self.device = device
 
         self.bbox_embed = None
         self.class_embed = None

@@ -26,7 +26,7 @@ from utils import box_ops
 from .structures import Boxes, matched_boxlist_iou
 from .structures.tracks import Tracks
 from .orn import OcclusionRecoveryNetwork
-
+from utils.utils import is_distributed, distributed_world_size
 
 class FrameMatcher:
     def __init__(self, corrector, num_classes, matcher, weights, losses, focal_loss=True):
@@ -55,18 +55,67 @@ class FrameMatcher:
 
         self.corrector = corrector
         self.prev_instance = None
+        self.n_gts = []
 
     def initialize_for_single_clip(self, gt_instances):
         self.losses = {}
         self.device = None
         self.num_samples = 0
         self.gt_instances = gt_instances
+        self.n_gts = []
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
+
+    def get_sum_loss_dict(self, loss_dict: dict):
+        def get_weight(loss_name):
+            if "box_l1_loss" in loss_name:
+                return self.losses["box_l1_loss"]
+            elif "box_giou_loss" in loss_name:
+                return self.losses["box_giou_loss"]
+            elif "label_focal_loss" in loss_name:
+                return self.losses["label_focal_loss"]
+            else:
+                return 1.0
+
+        # 使用生成器表达式和 sum()
+        weighted_losses = [
+            torch.tensor(get_weight(k), dtype=torch.float32) *
+            (v if isinstance(v, torch.Tensor) else torch.tensor(v, dtype=torch.float32))
+            for k, v in loss_dict.items()
+        ]
+
+        if weighted_losses:
+            # 确保所有张量在同一设备上
+            device = weighted_losses[0].device if hasattr(weighted_losses[0], 'device') else None
+            if device:
+                weighted_losses = [loss.to(device) for loss in weighted_losses]
+            return sum(weighted_losses)
+        else:
+            return torch.tensor(0.0, requires_grad=True)
+
+    def get_mean_by_n_gts(self):
+        total_n_gts = sum(self.n_gts)
+        total_n_gts = torch.as_tensor(total_n_gts, dtype=torch.float, device=self.device)
+        n_gts = torch.as_tensor(self.n_gts, dtype=torch.float, device=self.device)
+        if is_distributed():
+            torch.distributed.all_reduce(total_n_gts)
+            torch.distributed.all_reduce(n_gts)
+        total_n_gts = torch.clamp(total_n_gts / distributed_world_size(), min=1).item()
+        n_gts = torch.clamp(n_gts / distributed_world_size(), min=1).tolist()
+        loss = {}
+        for k in self.losses:
+            loss[k] = self.losses[k] / total_n_gts
+        log = {}
+        # for k in self.log:
+        #     for i in range(len(n_gts)):
+        #         if f"frame{i}" in k:
+        #             log[k] = (self.log[k] / n_gts[i], 1)
+        #             break
+        return loss, log
 
     def calc_loss_for_track_scores(self, track_instances):
         frame_id = self._current_frame_idx - 1
@@ -198,7 +247,7 @@ class FrameMatcher:
         losses = {'cardinality_error': card_err}
         return losses
 
-    def regress_for_single_frame(self, outputs, frame_idx, device, features, cls_head, reg_head, occ_threshold=0.5):
+    def regress_for_single_frame(self, outputs, frame_idx, device, features, cls_head, box_head, occ_threshold=0.5):
         """
             Match all tracks and calculates losses for a single frame.
             The unmatched tracks will be further input into partition networks (New!)
@@ -212,8 +261,8 @@ class FrameMatcher:
                 Unmatched tracks
         """
         # Step 1. Get all ground truths for current (i-th) frame
-        gt_instances = self.gt_instances[frame_idx]
-        track_instances = outputs['track_instance']
+        gt_instances = self.gt_instances[frame_idx][0]
+        track_instances = outputs['track_instances']
         unmatched_instances = None                              # Unmatched Scenarios: 1. Totally missing. 2. Occlusion
 
         if frame_idx == 0:
@@ -226,7 +275,7 @@ class FrameMatcher:
         }  # Model outputs for i-th frame
 
         # Step 3. Get all (ground truth) object index in i-th frame
-        obj_idxes_list = gt_instances.obj_ids.detach().cpu().numpy().tolist()
+        obj_idxes_list = gt_instances["obj_ids"].detach().cpu().numpy().tolist()
         obj_gt_mapping = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
 
         # Step 4. Inherit and updating tracked instances.
@@ -237,10 +286,11 @@ class FrameMatcher:
             obj_id = track_instances.obj_idxes[j].item()
 
             if obj_id >= 0:  # Exist tracking
+                # Need to refine for object ID storage
                 if obj_id not in obj_gt_mapping:
                     num_disappear_tracks += 1  # May not be used for loss calculating
                     track_instances.matched_gt_idxes[j] = -1
-                    track_instances.missing_gt_idxes[j] = obj_gt_mapping[obj_id]
+                    # track_instances.missing_gt_idxes[j] = obj_gt_mapping[obj_id]
                 else:
                     track_instances.matched_gt_idxes[j] = obj_gt_mapping[obj_id]
             else:
@@ -250,9 +300,9 @@ class FrameMatcher:
         full_track_idxes = torch.arange(len(track_instances), dtype=torch.long).to(device)      # [0, 1, ..., N]
         matched_track_idxes = (track_instances.obj_idxes >= 0)                                  # [F, F, T, ..., T]
         # （M, 2) Matched Obj, a table indicating track idx with GT idx
-        prev_matched_track_idxes = torch.stack(
-                                    [full_track_idxes[matched_track_idxes],                     # [[track_idx, gt_idx]]
-                                    track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(device)
+        # prev_matched_track_idxes = torch.stack(
+        #                             [full_track_idxes[matched_track_idxes],                     # [[track_idx, gt_idx]]
+        #                             track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(device)
 
         # Step 4.2: Unmatched Objects for whole process (globally)
         unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
@@ -261,18 +311,24 @@ class FrameMatcher:
         tgt_indexes = track_instances.matched_gt_idxes
         tgt_indexes = tgt_indexes[tgt_indexes != -1]
 
-        tgt_state = torch.zeros(len(gt_instances)).to(device)
+        tgt_state = torch.zeros(len(gt_instances["labels"])).to(device)
         tgt_state[tgt_indexes] = 1
-        untracked_tgt_indexes = torch.arange(len(gt_instances)).to(device)[tgt_state == 0]
-        untracked_gt_instances = gt_instances[untracked_tgt_indexes]
+        gt_instances["labels"] = gt_instances["labels"].to(device)
+        gt_instances["boxes"] = gt_instances["boxes"].to(device)
+        untracked_tgt_indexes = torch.arange(len(gt_instances["labels"])).to(device)[tgt_state == 0]
+        # untracked_gt_instances = gt_instances[untracked_tgt_indexes]
 
+        unmatched_targets = [{
+            'labels': gt_instances["labels"][untracked_tgt_indexes],  # tensor [num_untracked]
+            'boxes': gt_instances["boxes"][untracked_tgt_indexes],  # tensor [num_untracked, 4]
+        }]
 
         # Step 5: Hungarian Matching for the unmatched objects
         unmatched_outputs = {
             'pred_logits': track_instances.pred_logits[unmatched_track_idxes].unsqueeze(0),
             'pred_boxes': track_instances.pred_boxes[unmatched_track_idxes].unsqueeze(0),
         }                                                                               # Unmatched loss dict
-        matching_res = self.matcher(outputs=det_loss, target=[unmatched_outputs])       # Batch = 1 for target （Tuple)
+        matching_res = self.matcher(outputs=det_loss, targets=[unmatched_targets])       # Batch = 1 for target （Tuple)
         matching_res = [list(res) for res in matching_res]
 
         # Step 5.1: Split new object or occluded and Update result:
@@ -280,34 +336,46 @@ class FrameMatcher:
 
         for match in matching_res:
             if match:
-                idx = match[0]
-                if track_instances.scores[idx] >= occ_threshold:
-                    new_indices.append(idx)                                             # 理论不需要单独切片 (Merge)
-                else:
-                    occ_indices.append(idx)                                             # 只针对遮挡物体进行处理
+                pred_indices = match[0]  # tensor([p1, p2, ...])
+                for idx in pred_indices:
+                    idx = int(idx)  # 转成 Python int
+                    score_val = float(track_instances.scores[idx])
+                    if score_val >= occ_threshold:
+                        new_indices.append(idx)
+                    else:
+                        occ_indices.append(idx)
 
         occluded_tracks = track_instances[occ_indices] if occ_indices else None
 
         # Step 6: Preparing loss computation
-        def matcher_res_for_gt_idx(res, valid_indices):
-            # 只处理new_indices对应的匹配
+        def matcher_res_for_gt_idx(res, valid_indices, unmatched_track_idxes, untracked_tgt_indexes, device):
             valid_matches = [(src, tgt) for i, (src, tgt) in enumerate(zip(res[0][0], res[0][1]))
                              if i in valid_indices]
 
             if not valid_matches:
-                return torch.empty((0, 2), dtype=torch.long)
+                # 空匹配：返回 shape (0, 2)
+                return torch.empty((0, 2), dtype=torch.long, device=device)
 
-            src_idx, tgt_idx = zip(*valid_matches)
+            src_idx, tgt_idx = zip(*valid_matches)  # tuple of tensors
+            src_idx = torch.as_tensor(src_idx, dtype=torch.long, device=device)
+            tgt_idx = torch.as_tensor(tgt_idx, dtype=torch.long, device=device)
+
             new_matched_indices = torch.stack([
-                unmatched_track_idxes[list(src_idx)],
-                untracked_tgt_indexes[list(tgt_idx)]
-            ], dim=1).to(device)
+                unmatched_track_idxes[src_idx],
+                untracked_tgt_indexes[tgt_idx]
+            ], dim=1)  # 保证是 (N, 2)
+
             return new_matched_indices
 
         if new_indices:
-            new_matched_indices = matcher_res_for_gt_idx(matching_res, new_indices)
-            track_instances.obj_idxes[new_matched_indices[:, 0]] = gt_instances.obj_ids[
-                new_matched_indices[:, 1]].long()
+            new_matched_indices = matcher_res_for_gt_idx(matching_res, new_indices, unmatched_track_idxes, untracked_tgt_indexes, device)
+            # 确保将所有张量移动到相同的设备
+            new_matched_indices = new_matched_indices.to(track_instances.obj_idxes.device)
+            gt_obj_ids = gt_instances["obj_ids"].to(new_matched_indices.device)[new_matched_indices[:, 1]].long()
+            gt_obj_ids = gt_obj_ids.to(track_instances.obj_idxes.device)
+
+            # 然后进行赋值
+            track_instances.obj_idxes[new_matched_indices[:, 0]] = gt_obj_ids
             track_instances.matched_gt_idxes[new_matched_indices[:, 0]] = new_matched_indices[:, 1]
 
         # Step 6*: Occlusion Recovery Mechanism
@@ -316,19 +384,45 @@ class FrameMatcher:
             Input: Occluded tracks, prev_matched_track_idxes 当前信息和上一帧的信息
             Returns: loss
         """
-        self.corrector(occluded_tracks, self.prev_instance[occ_indices], frame_idx, features)
+        if occluded_tracks is not None:
+            self.corrector(occluded_tracks, self.prev_instance[occ_indices], frame_idx, features, cls_head, box_head)
 
         # Step 7: loss computation
         self.sample_device = device
-        for loss in self.loss_name:
-            new_track_loss = self.get_loss(loss,
-                                           outputs=outputs,
-                                           gt_instances=[gt_instances],
-                                           indices=[(new_indices[:, 0], new_indices[:, 1])],
-                                           num_boxes=1)
-            self.losses.update(
-                {'frame_{}_{}'.format(self._current_frame_idx, key): value for key, value in new_track_loss.items()})
 
+        # 保证 new_indices 是 Tensor
+        if not torch.is_tensor(new_indices):
+            new_indices = torch.as_tensor(new_indices, dtype=torch.long, device=device)
+
+        for loss in self.loss_name:
+
+            if not torch.is_tensor(new_indices):
+                new_indices = torch.as_tensor(new_indices, dtype=torch.long, device=device)
+
+            # 保证维度 (N, 2)
+            if new_indices.ndim == 1:
+                if new_indices.numel() == 0:
+                    new_indices = new_indices.view(0, 2)  # 空匹配
+                elif new_indices.numel() == 2:
+                    new_indices = new_indices.view(1, 2)  # 单个匹配对
+                else:
+                    raise ValueError(f"Unexpected new_indices shape: {new_indices.shape}")
+
+            indices = [(new_indices[:, 0], new_indices[:, 1])]
+
+            new_track_loss = self.get_loss(
+                loss,
+                outputs=outputs,
+                gt_instances=[gt_instances],
+                indices=indices,
+                num_boxes=1
+            )
+            self.losses.update(
+                {
+                    f'frame_{self._current_frame_idx}_{key}': value
+                    for key, value in new_track_loss.items()
+                }
+            )
 
         self.prev_instance = track_instances
         return track_instances
@@ -341,33 +435,22 @@ class FrameMatcher:
     #     return track_instances
 
 
-def match_for_single_decoder_layer(unmatched_outputs, matcher, untracked_gt_instances,
-                                   unmatched_track_idxes, untracked_tgt_indexes, pred_logits_i):
-    new_track_indices = matcher(unmatched_outputs,
-                                [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
-
-    src_idx = new_track_indices[0][0]
-    tgt_idx = new_track_indices[0][1]
-    # concat src and tgt.
-    new_matched_indices = torch.stack([unmatched_track_idxes[src_idx],
-                                       untracked_tgt_indexes[tgt_idx]],
-                                      dim=1).to(pred_logits_i.device)
-    return new_matched_indices
-
-
 def build_criterion(args):
     matcher = build_matcher(args)
-    num_frames_per_batch = max(args.sampler_lengths)
+    num_frames_per_batch = max(args.SAMPLER_LENGTHS)
     weight_dict = {}
+    corrector = OcclusionRecoveryNetwork(window_size=args.WINDOW_SIZE, dim=args.HIDDEN_DIM,
+                                         heads=args.NUM_HEADS, dropout=args.DROPOUT)
     for i in range(num_frames_per_batch):
-        weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
-                            'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
-                            'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
+        weight_dict.update({"frame_{}_loss_ce".format(i): args.CLS_LOSS_COEF,
+                            'frame_{}_loss_bbox'.format(i): args.BBOX_LOSS_COEF,
+                            'frame_{}_loss_giou'.format(i): args.GIOU_LOSS_COEF,
                             })
     return FrameMatcher(
-        num_classes=args.num_classes,
+        corrector=corrector,
+        num_classes=args.NUM_CLASSES,
         matcher=matcher,
         weights=weight_dict,
         losses=['labels', 'boxes'],
-        focal_loss=args.focal_loss,
+        focal_loss=args.FOCAL_LOSS,
     )

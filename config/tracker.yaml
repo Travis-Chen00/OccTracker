@@ -1,0 +1,78 @@
+# /config/model.yaml
+
+# Base config files (可以留空)
+BASE: []
+
+# Dataset config
+BATCH_SIZE: 10
+DATA_ROOT: "/home/boyu/Desktop/OccTracker/dataset/v1.0-mini"
+DATASET: "nuscenes"
+VERSION: "v1.0-mini"          # nuScenes 版本
+IMAGE_SIZE: 224
+INTERPOLATION: "bilinear"
+NUM_WORKERS: 8
+# 相机类型
+CAMERA_TYPES: [CAM_FRONT]
+# 时序设置
+TEMPORAL: True
+NUM_FRAMES: 2   # 同场景前一帧 + 当前帧
+# 筛选设置
+FILTER_CATEGORIES: None
+MIN_VISIBILITY: 0
+
+
+# Model config
+BACKBONE: "resnet50"
+PRETRAINED:                               # Backbone training
+NUM_CLASSES: 10
+POS_EMBED: "sine"
+MASKS: False
+DILATION: False
+PRETRAINED_MODEL:                         # Model training
+
+DROPOUT: 0.0
+WINDOW_SIZE: [8, 8]
+DEVICE: "cuda"
+USE_CHECKPOINT: False
+CHECKPOINT_LEVEL:
+MEM_BANK_LEN: 10
+
+# Transformer:
+NUM_DET_QUERIES: 100
+TWO_STAGES: False
+DECODER_CROSS_SELF: False
+
+HIDDEN_DIM: 256
+FFN_DIM: 2048
+FEATURE_LEVEL: 4
+NUM_HEADS: 8
+NUM_ENC_POINTS: 4
+NUM_DEC_POINTS: 4
+NUM_ENC_LAYERS: 6
+NUM_DEC_LAYERS: 6
+NUM_QUERIES: 100
+ACTIVATION: "relu"
+OCC_THRESHOLD: 0.5
+MISS_PERIOD: 10
+
+# Criterion
+SAMPLER_LENGTHS: [2, 3, 4]
+FOCAL_LOSS: True
+CLS_LOSS_COEF: 2
+BBOX_LOSS_COEF: 5
+GIOU_LOSS_COEF: 2
+MATCH_COST_CLASS: 2
+MATCH_COST_BBOX: 5
+MATCH_COST_GIOU: 2
+
+# Train config
+EPOCH: 100
+LR: 2.0e-4
+LR_BACKBONE: 2.0e-1
+LR_SCHEDULER: MultiStep
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12]
+SEED: 40
+OPTIMIZER: "adamw"
+SHUFFLE: true
+OUTPUT_DIR: "/home/boyu/Desktop/OccTracker/ouputs"                                # The output logging info.

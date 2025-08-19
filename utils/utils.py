@@ -6,7 +6,7 @@ import torch.distributed
 import torch.backends.cudnn
 import numpy as np
 
-from misc import is_main_process
+from .misc import is_main_process
 
 def get_model(model):
     return model if is_distributed() is False else model.module

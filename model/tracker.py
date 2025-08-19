@@ -12,18 +12,19 @@ from .criterion import build_criterion
 from .structures.tracks import Tracks
 
 class Tracker(nn.Module):
-    def __init__(self, args,
+    def __init__(self,
                  backbone,
                  transformer,
                  criterion,
+                 device,
                  num_classes,
                  num_queries,
                  num_feature_levels,
+                 num_dec_layers,
                  occ_threshold=0.5,
                  memory_bank=None,
                  use_checkpoint=False):
         super(Tracker, self).__init__()
-        self.args = args
         self.backbone = backbone
         self.transformer = transformer
         hidden_dim = transformer.d_model
@@ -32,9 +33,14 @@ class Tracker(nn.Module):
         self.num_feature_levels = num_feature_levels
         self.criterion = criterion
 
-        self.class_embed = nn.Linear(hidden_dim, num_classes)                               # 分类头
-        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)             # 回归头
+        self.class_embed = nn.ModuleList([
+            nn.Linear(hidden_dim, num_classes) for _ in range(num_dec_layers)
+        ])
+        self.bbox_embed = nn.ModuleList([
+            MLP(hidden_dim, hidden_dim, 4, 3) for _ in range(num_dec_layers)
+        ])
         self.query_embed = nn.Embedding(num_queries, hidden_dim * 2)
+        self.device = device
 
         if num_feature_levels > 1:
             num_backbone_outs = len(backbone.strides)
@@ -71,13 +77,13 @@ class Tracker(nn.Module):
         self.image_size = (1,1)
         self.feature_mem = {}
 
-    def _generate_empty_tracks(self, image_size):
-        num_queries, dim = self.query_embed.weight.shape  # (300, 512)
-        device = self.query_embed.weight.device
-
-        track_instances = Tracks._init_tracks(image_size, dim, num_queries, self.mem_bank_len, device)
-
-        return track_instances.to(self.query_embed.weight.device)
+    # def _generate_empty_tracks(self, image_size):
+    #     num_queries, dim = self.query_embed.weight.shape  # (300, 512)
+    #     device = self.query_embed.weight.device
+    #
+    #     track_instances = Tracks._init_tracks(image_size, dim, num_queries, self.mem_bank_len, device)
+    #
+    #     return track_instances.to(device)
 
     def _process_single_frame(self, frame, track_instances, frame_idx):
         # Will be changed into forward(), Train the model frame by frame
@@ -103,9 +109,9 @@ class Tracker(nn.Module):
                     src = self.input_proj[level](features[-1].tensors)
                 else:
                     src = self.input_proj[level](srcs[-1])
-                m = frame.mask
+                m = frame.masks
                 mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                pos_l = self.backbone.position_embedding(NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
@@ -113,9 +119,9 @@ class Tracker(nn.Module):
         (hs, init_reference,
          inter_references, enc_outputs_class,
          enc_outputs_coord) = self.transformer(srcs, masks,
-                                               pos_embed=pos,
+                                               pos_embeds=pos,
                                                query_embed=track_instances.query_pos,
-                                               ref_pts=track_instances.ref_pts)
+                                               ref_pts=track_instances.ref_pts,)
         # hs: result
         # init_reference: Reference points (layer 0)
         # inter_reference: Reference points (layer > 0)
@@ -132,7 +138,10 @@ class Tracker(nn.Module):
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
 
-        ref_pts_all = torch.cat([init_reference[None], inter_references[:, :, :, :2]], dim=0)
+        ref_pts_all = torch.cat([
+            init_reference[..., :2][None],
+            inter_references[..., :2]
+        ], dim=0)
         out = {'hs': hs[-1],
                'pred_logits': outputs_class[-1],
                'pred_boxes': outputs_coord[-1],
@@ -173,9 +182,13 @@ class Tracker(nn.Module):
             else:
                 features = self.feature_mem[frame_idx - 1 : frame_idx]
 
-            # Get the loss and refine the bbox
-            frame_res = self.criterion.regress_for_single_frame(frame_res, frame_idx, self.device,
-                                                                      features, occ_threshold=self.occ_threshold)
+            self.criterion.regress_for_single_frame(outputs=frame_res, frame_idx=frame_idx,
+                                                     features=features,
+                                                     device=self.device,
+                                                     cls_head=self.class_embed,
+                                                     box_head=self.bbox_embed,
+                                                     occ_threshold=self.occ_threshold)
+
         else:
             # each track will be assigned an unique global id by the track base.
             self.track_recorder.update(track_instances)
@@ -186,70 +199,55 @@ class Tracker(nn.Module):
 
         if not self.training:
             outputs['track_instances'] = track_instances
-
         return outputs
 
 
-    def forward(self, frames):
+    def forward(self, frame, tracks, frame_idx, length):
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
         }
 
-        _image_size = frames[0][-2:]                            # (H,W)
-        track_instances = self._generate_empty_tracks(_image_size)
-        keys = list(track_instances._fields.keys())
+        _image_size = frame.tensors[0].shape[-2:]  # [height, width]                          # (H,W)
+        # track_instances = self._generate_empty_tracks(_image_size)
+        keys = list(tracks._fields.keys())
         features = None
 
-        for idx, frame in enumerate(frames):
-            prev_frame = frame
-            frame.requires_grad = False
-            _, frame_h, frame_w = frame.shape
+        prev_frame = frame
+        frame.requires_grad = False
 
-            if self.use_checkpoint and idx < len(frames) - 2:
-                # Continue the training
-                def fn(frame, *args):
-                    frame = nested_tensor_from_tensor_list([frame])
-                    tmp = Instances((1, 1), **dict(zip(keys, args)))
-                    frame_res, features = self._process_single_frame(frame, tmp)
-                    return (
-                        frame_res['pred_logits'],
-                        frame_res['pred_boxes'],
-                        frame_res['ref_pts'],
-                        frame_res['hs'],
-                        *[aux['pred_logits'] for aux in frame_res['aux_outputs']],
-                        *[aux['pred_boxes'] for aux in frame_res['aux_outputs']]
-                    )
-
-                args = [frame] + [track_instances.get(k) for k in keys]
-                params = tuple((p for p in self.parameters() if p.requires_grad))
-                tmp = checkpoint.CheckpointFunction.apply(fn, len(args), *args, *params)
-                frame_res = {
-                    'pred_logits': tmp[0],
-                    'pred_boxes': tmp[1],
-                    'ref_pts': tmp[2],
-                    'hs': tmp[3],
-                    'aux_outputs': [{
-                        'pred_logits': tmp[4+i],
-                        'pred_boxes': tmp[4+5+i],
-                    } for i in range(5)],
-                }
-            else:
+        if self.use_checkpoint and frame_idx < length - 2:
+            # Continue the training
+            def fn(frame, *args):
                 frame = nested_tensor_from_tensor_list([frame])
-                frame_res, features = self._process_single_frame(frame, track_instances, idx)
+                tmp = Instances((1, 1), **dict(zip(keys, args)))
+                frame_res, features = self._process_single_frame(frame, tmp, frame_idx)
+                return (
+                    frame_res['pred_logits'],
+                    frame_res['pred_boxes'],
+                    frame_res['ref_pts'],
+                    frame_res['hs'],
+                    *[aux['pred_logits'] for aux in frame_res['aux_outputs']],
+                    *[aux['pred_boxes'] for aux in frame_res['aux_outputs']]
+                )
 
-            frame_res = self._matching_frames_with_orm(frame_res, track_instances,
-                                                       len(frames) - idx, idx,)
-
-            track_instances = frame_res['track_instances']
-            outputs['pred_logits'].append(frame_res['pred_logits'])
-            outputs['pred_boxes'].append(frame_res['pred_boxes'])
-
-        if not self.training:
-            outputs['track_instances'] = track_instances
+            args = [frame] + [tracks.get(k) for k in keys]
+            params = tuple((p for p in self.parameters() if p.requires_grad))
+            tmp = checkpoint.CheckpointFunction.apply(fn, len(args), *args, *params)
+            frame_res = {
+                'pred_logits': tmp[0],
+                'pred_boxes': tmp[1],
+                'ref_pts': tmp[2],
+                'hs': tmp[3],
+                'outputs': [{
+                    'pred_logits': tmp[4+i],
+                    'pred_boxes': tmp[4+5+i],
+                } for i in range(5)],
+            }
         else:
-            outputs['losses_dict'] = self.criterion.losses_dict
-        return outputs
+            frame_res = self._process_single_frame(frame, tracks, frame_idx)
+        frame_res = self._matching_frames_with_orm(frame_res, tracks, frame_idx, frame_idx)
+        return frame_res
 
 def build_tracker(args):
     dataset_to_num_classes = {
@@ -258,12 +256,20 @@ def build_tracker(args):
 
     backbone = build_backbone(args)
     transformer = build_deforamble_transformer(args)
-
     criterion = build_criterion(args)
 
     model = Tracker(
         backbone=backbone,
         transformer=transformer,
-        criterion=criterion,)
+        criterion=criterion,
+        device=args.DEVICE,
+        num_classes=args.NUM_CLASSES,
+        num_queries=args.NUM_QUERIES,
+        num_feature_levels=args.FEATURE_LEVEL,
+        num_dec_layers=args.NUM_DEC_LAYERS,
+        occ_threshold=args.OCC_THRESHOLD,
+        memory_bank=None,
+        use_checkpoint=args.USE_CHECKPOINT,
+    )
 
     return model

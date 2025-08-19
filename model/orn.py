@@ -18,13 +18,13 @@ from torch.nn.init import trunc_normal_
 def to_2tuple(x):
     if isinstance(x, (list, tuple)):
         if len(x) == 1:
-            return (x[0], x[0])
+            return x[0], x[0]
         elif len(x) >= 2:
-            return (x[0], x[1])
+            return x[0], x[1]
         else:
             raise ValueError("Input sequence is empty")
     else:
-        return (x, x)
+        return x, x
 
 def window_partition(feature, window_size):
     """
@@ -313,14 +313,11 @@ class OcclusionRecoveryNetwork(nn.Module):
         :d_model, d_ffn: Dimension of hidden layers
         :num_heads, num_layers: Attention block parameters
     """
-    def __init__(self, window_size, dim, heads, dropout, cls_head, bbox_head):
+    def __init__(self, window_size, dim, heads, dropout):
         super().__init__()
         self.windowAttn = WindowCuttingPosition(window_size, dim, heads, dropout)
-        self.cls_head = cls_head
-        self.bbox_head = bbox_head
 
-
-    def forward(self, unmatched_instances, prev_instances, frame_idx, features):
+    def forward(self, unmatched_instances, prev_instances, frame_idx, features, cls_head, bbox_head):
         # 两个dict 对应unmatched instances 在不同帧
         cur_instance_idxes = unmatched_instances[frame_idx].obj_ids.detach().cpu().numpy().tolist()
         prev_instance_idxes = prev_instances[frame_idx].obj_ids.detach().cpu().numpy().tolist()
@@ -345,8 +342,8 @@ class OcclusionRecoveryNetwork(nn.Module):
                           self.unmatched_instances[frame_idx][idx].pred_box.tolist()]
 
             completed_token = self.windowAttn(image_size, features, coords)
-            outputs_class = self.class_embed(completed_token)   # Classification
-            tmp = self.bbox_embed(completed_token)              # Bounding box
+            outputs_class = cls_head(completed_token)   # Classification
+            tmp = bbox_head(completed_token)              # Bounding box
             outputs_coord = tmp.sigmoid()
 
             # 更新结果

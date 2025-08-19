@@ -48,18 +48,15 @@ def box_iou(boxes1, boxes2):
 
 
 def generalized_box_iou(boxes1, boxes2):
-    """
-    Generalized IoU from https://giou.stanford.edu/
+    # 修正非法 box
+    x0y0_1 = torch.min(boxes1[:, :2], boxes1[:, 2:])
+    x1y1_1 = torch.max(boxes1[:, :2], boxes1[:, 2:])
+    boxes1 = torch.cat([x0y0_1, x1y1_1], dim=1)
 
-    The boxes should be in [x0, y0, x1, y1] format
+    x0y0_2 = torch.min(boxes2[:, :2], boxes2[:, 2:])
+    x1y1_2 = torch.max(boxes2[:, :2], boxes2[:, 2:])
+    boxes2 = torch.cat([x0y0_2, x1y1_2], dim=1)
 
-    Returns a [N, M] pairwise matrix, where N = len(boxes1)
-    and M = len(boxes2)
-    """
-    # degenerate boxes gives inf / nan results
-    # so do an early check
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
     iou, union = box_iou(boxes1, boxes2)
 
     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
@@ -67,7 +64,6 @@ def generalized_box_iou(boxes1, boxes2):
 
     wh = (rb - lt).clamp(min=0)  # [N,M,2]
     area = wh[:, :, 0] * wh[:, :, 1]
-
     return iou - (area - union) / area
 
 

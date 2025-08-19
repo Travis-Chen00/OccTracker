@@ -17,11 +17,12 @@ from ..ops.modules import MSDeformAttn
 from ..util import _get_clones, _get_activation
 
 class DeformableEncoder(nn.Module):
-    def __init__(self, encoder_layer, num_layers, use_checkpoint):
+    def __init__(self, encoder_layer, num_layers, use_checkpoint, device):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
         self.use_checkpoint = use_checkpoint
+        self.device = device
 
     @staticmethod
     def get_reference_point(spatial_shape, ratios, device):
@@ -103,6 +104,7 @@ class DeformableEncoderLayer(nn.Module):
         src = self.norm2(src)
         return src
 
+
     def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
         """
         Args:
@@ -121,5 +123,5 @@ class DeformableEncoderLayer(nn.Module):
         src = self.norm1(src)
 
         # ffn
-        src = self.forward_ffn(src)
+        src = self.ffn(src)
         return src

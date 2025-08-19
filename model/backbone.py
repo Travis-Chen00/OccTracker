@@ -142,8 +142,8 @@ class FeatureExtractor(nn.Module):
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
 
-    train_backbone = args.lr_backbone > 0
-    return_interm_layers = args.masks or (args.num_feature_levels > 1)
+    train_backbone = int(args.LR_BACKBONE) > 0
+    return_interm_layers = args.MASKS or (args.FEATURE_LEVEL > 1)
 
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    backbone = Backbone(args.BACKBONE, train_backbone, return_interm_layers, args.DILATION)
     return FeatureExtractor(backbone, position_embedding)

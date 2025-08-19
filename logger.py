@@ -69,7 +69,8 @@ class Logger:
         if (self.only_main and is_main_process()) or (self.only_main is False):
             if isinstance(log, dict):
                 if head != "":
-                    raise Warning("Log is a dict, Do not support 'head' attr.")
+                    with open(os.path.join(self.logdir, filename), mode=mode) as f:
+                        f.write(f"# {head}\n")
                 if len(filename) > 5 and filename[-5:] == ".yaml":
                     self.write_dict_to_yaml(log, filename, mode)
                 elif len(filename) > 5 and filename[-5:] == ".json":
