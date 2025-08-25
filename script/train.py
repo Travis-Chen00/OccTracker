@@ -1,7 +1,7 @@
 # Data loader
 # Model Train (Frame by frame as input)
-# logger
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import argparse
 import time
 
@@ -115,7 +115,6 @@ def train(config):
     for epoch in range(start_epoch, config.EPOCH):
         sampler_train = RandomSampler(dataset_train) if config.SHUFFLE else SequentialSampler(dataset_train)
 
-        # 如果分布式训练，替换上面一行为 DistributedSampler，并加下面一句：
         if is_distributed():
             sampler_train.set_epoch(epoch)
 
@@ -286,7 +285,11 @@ def get_param_groups(config, model):
 
 if __name__ == '__main__':
     import sys
-    sys.argv = ['train.py', '--cfg', '/home/boyu/Desktop/OccTracker/config/tracker.yaml']
+
+    config_path = os.path.join(os.path.dirname(__file__), "../config/tracker.yaml")
+    config_path = os.path.abspath(config_path)
+
+    sys.argv = ['train.py', '--cfg', config_path]
     cfg = parse_options()
 
     train(cfg)

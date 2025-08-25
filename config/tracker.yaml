@@ -5,7 +5,7 @@ BASE: []
 
 # Dataset config
 BATCH_SIZE: 10
-DATA_ROOT: "/home/boyu/Desktop/OccTracker/dataset/v1.0-mini"
+DATA_ROOT: "dataset/v1.0-mini"
 DATASET: "nuscenes"
 VERSION: "v1.0-mini"          # nuScenes 版本
 IMAGE_SIZE: 224
@@ -75,4 +75,4 @@ LR_DROP_MILESTONES: [12]
 SEED: 40
 OPTIMIZER: "adamw"
 SHUFFLE: true
-OUTPUT_DIR: "/home/boyu/Desktop/OccTracker/ouputs"                                # The output logging info.
+OUTPUT_DIR: "outputs"                                # The output logging info.
